@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pymupdf
 from fastapi.testclient import TestClient
@@ -12,7 +13,7 @@ from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from backend.app import db, main
+from backend.app import db, ingest, main
 from backend.app.db import Base, Document
 
 
@@ -21,9 +22,10 @@ def compile_vector_for_test(element, compiler, **kwargs):
     return "BLOB"
 
 
-class Jobs:
-    def submit(self, *args):
-        return None
+class FakeEmbedder:
+    def encode(self, texts, **kwargs):
+        values = [0.01] * 384 if isinstance(texts, str) else [[0.01] * 384 for _ in texts]
+        return SimpleNamespace(tolist=lambda: values)
 
 
 class FakeAI:
@@ -49,18 +51,21 @@ class APIFlowTests(unittest.TestCase):
 
         @asynccontextmanager
         async def fake_lifespan(app):
-            app.state.embedder = object()
+            app.state.embedder = FakeEmbedder()
             app.state.ai = FakeAI()
-            app.state.jobs = Jobs()
             yield
 
         previous_lifespan = main.app.router.lifespan_context
         previous_dir = main.PDF_DIR
+        previous_ingest_dir = ingest.PDF_DIR
+        previous_sessions = db.SessionLocal
         main.app.router.lifespan_context = fake_lifespan
         main.app.dependency_overrides[db.get_db] = override_db
         try:
             with tempfile.TemporaryDirectory() as folder:
                 main.PDF_DIR = Path(folder)
+                ingest.PDF_DIR = Path(folder)
+                db.SessionLocal = sessions
                 pdf = pymupdf.open()
                 page = pdf.new_page()
                 page.insert_text((50, 90), "Node A points to Node B.")
@@ -79,6 +84,7 @@ class APIFlowTests(unittest.TestCase):
                     )
                     self.assertEqual(posted.status_code, 201, posted.text)
                     doc_id = posted.json()["id"]
+                    self.assertEqual(posted.json()["status"], "ready")
                     self.assertEqual(
                         browser.get("/api/documents").json()[0]["id"], doc_id
                     )
@@ -105,7 +111,7 @@ class APIFlowTests(unittest.TestCase):
                     self.assertEqual(
                         browser.post(
                             "/api/documents/" + doc_id + "/questions",
-                            json={"question": "What is the algorithm?"},
+                            json={"question": "?"},
                         ).status_code,
                         422,
                     )
@@ -134,10 +140,28 @@ class APIFlowTests(unittest.TestCase):
                         browser.delete("/api/documents/" + doc_id).status_code, 204
                     )
                     self.assertEqual(browser.get("/api/documents").json(), [])
+                    expired = browser.post(
+                        "/api/documents",
+                        files={"file": ("expired.pdf", io.BytesIO(picture), "application/pdf")},
+                    )
+                    self.assertEqual(expired.status_code, 201, expired.text)
+                    expired_id = expired.json()["id"]
+                    (main.PDF_DIR / f"{expired_id}.pdf").unlink()
+                    self.assertEqual(browser.get("/api/documents").json(), [])
+                    self.assertEqual(browser.get(f"/api/documents/{expired_id}").status_code, 404)
+                    self.assertEqual(
+                        browser.post(
+                            f"/api/documents/{expired_id}/questions",
+                            json={"question": "What is the algorithm?"},
+                        ).status_code,
+                        404,
+                    )
         finally:
             main.app.router.lifespan_context = previous_lifespan
             main.app.dependency_overrides.clear()
             main.PDF_DIR = previous_dir
+            ingest.PDF_DIR = previous_ingest_dir
+            db.SessionLocal = previous_sessions
             engine.dispose()
 
 

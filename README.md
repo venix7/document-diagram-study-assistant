@@ -8,7 +8,7 @@ Upload a CS lecture PDF, ask questions about its text, select a diagram region f
 - **Grounded answers:** Groq GPT-OSS 20B returns structured answers and excerpt numbers. The API maps those numbers to real pages and excerpts, rejecting nonexistent references.
 - **Diagram questions:** select a rectangle on the displayed PDF page; PyMuPDF renders only that region and Groq's configurable vision model explains it. The page is shown as the source.
 - **Practice:** generate three cited quiz questions or flashcards from the PDF; save questions, answers, and study sets in Neon.
-- **Files:** PDFs reside in `data/pdfs` locally and on a Railway volume at `/app/data`. An HttpOnly session cookie restricts files and history to the current browser.
+- **Files:** PDFs reside in `data/pdfs` locally. On Cloud Run they use temporary `/tmp/margin-data/pdfs` storage; users re-upload after the instance is replaced. An HttpOnly session cookie restricts the current workspace to its browser.
 
 No labelled training dataset or custom classifier is needed. The pretrained embedding model runs with PyTorch and is downloaded during the Docker build. The live smoke-test PDF is generated in code. This first version indexes selectable text; image-only scans still have page previews and manually selected diagram questions, but no whole-page OCR.
 
@@ -77,7 +77,7 @@ The seven local tests do not need Neon, Groq, or the embedding model download. T
 
 ## Deployment
 
-See [DEPLOYMENT.md](DEPLOYMENT.md) for the exact Docker/Railway/Neon steps and [PHASES.md](PHASES.md) for the six-commit build map. Keep the Railway service at one replica with one Uvicorn worker, because PDF jobs are processed in the API process and resumed at startup. The app starts only after PostgreSQL and the local embedding model are ready. Set Railway's health check to `/api/health`.
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the Docker/Cloud Run/Neon steps and [PHASES.md](PHASES.md) for the six-commit build map. PDF indexing finishes within the upload request. Keep Cloud Run at one instance and one Uvicorn worker so page requests can access the current temporary PDF. The app starts after PostgreSQL and the local embedding model are ready. Check `/api/health`.
 
 This is a browser-session study workspace, not an account-based document vault. Clearing the session cookie loses access to previous PDFs; avoid confidential material until account authentication and retention policy are added. Text excerpts and selected diagram crops are sent to Groq when the corresponding feature is used. The supported vision model can change; `GROQ_VISION_MODEL` is configurable.
 

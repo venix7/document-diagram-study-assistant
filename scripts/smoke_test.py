@@ -36,7 +36,7 @@ def sample_pdf() -> bytes:
 
 
 def request_json(client, method: str, url: str, **kwargs):
-    response = client.request(method, url, timeout=90, **kwargs)
+    response = client.request(method, url, timeout=300, **kwargs)
     if not response.ok:
         raise RuntimeError(
             f"{method} {url} returned {response.status_code}: {response.text[:400]}"
@@ -47,7 +47,7 @@ def request_json(client, method: str, url: str, **kwargs):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "base_url", help="http://127.0.0.1:8000 or the Railway public URL"
+        "base_url", help="http://127.0.0.1:8000 or the Cloud Run public URL"
     )
     args = parser.parse_args()
     base = args.base_url.rstrip("/")

@@ -1,12 +1,12 @@
 import hashlib
 import os
 import secrets
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from sentence_transformers import SentenceTransformer
 from sqlalchemy import select
@@ -42,17 +42,9 @@ async def lifespan(app: FastAPI):
     app.state.ai = AIService()
     if os.getenv("APP_ENV") == "production" and app.state.ai.client is None:
         raise RuntimeError("Set GROQ_API_KEY for the production service")
-    app.state.jobs = ThreadPoolExecutor(max_workers=1)
-    with db.db_session() as session:
-        unfinished = session.scalars(
-            select(Document).where(Document.status.in_(["pending", "processing"]))
-        ).all()
-        for doc in unfinished:
-            app.state.jobs.submit(ingest_document, doc.id, app.state.embedder)
     try:
         yield
     finally:
-        app.state.jobs.shutdown(wait=False, cancel_futures=True)
         if db.engine is not None:
             db.engine.dispose()
 
@@ -73,7 +65,11 @@ def owned_document(session: Session, request: Request, document_id: str) -> Docu
     doc = session.scalar(
         select(Document).where(Document.id == document_id, Document.owner_hash == owner)
     )
-    if doc is None:
+    if (
+        doc is None
+        or doc.status not in {"ready", "failed"}
+        or not document_path(doc).is_file()
+    ):
         raise HTTPException(404, "Document not found")
     return doc
 
@@ -107,12 +103,17 @@ def documents(request: Request, session: DbSession):
     owner = session_hash(request.cookies.get(COOKIE_NAME))
     if owner is None:
         return []
-    return session.scalars(
+    found = session.scalars(
         select(Document)
         .where(Document.owner_hash == owner)
         .order_by(Document.created_at.desc())
         .limit(50)
     ).all()
+    return [
+        doc
+        for doc in found
+        if doc.status in {"ready", "failed"} and document_path(doc).is_file()
+    ]
 
 
 @app.post("/api/documents", response_model=DocumentView, status_code=201)
@@ -156,7 +157,8 @@ async def upload_document(
         session.rollback()
         path.unlink(missing_ok=True)
         raise
-    request.app.state.jobs.submit(ingest_document, doc.id, request.app.state.embedder)
+    await run_in_threadpool(ingest_document, doc.id, request.app.state.embedder)
+    session.refresh(doc)
     return doc
 
 
